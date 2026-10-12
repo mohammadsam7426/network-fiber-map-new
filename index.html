@@ -1,0 +1,210 @@
+
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network Fiber Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,sans-serif;background:#f1f5f9;color:#172033}
+header{background:#123b62;color:white;padding:16px}
+header h2{margin:0 0 6px}
+main{max-width:1100px;margin:auto;padding:12px}
+.card{background:white;padding:15px;border-radius:12px;margin-bottom:12px;box-shadow:0 2px 8px #0001}
+#map{height:360px;border-radius:10px;z-index:1}
+input,select,button{width:100%;padding:11px;margin:5px 0;border:1px solid #cbd5e1;border-radius:7px;font-size:15px}
+button{background:#1263a0;color:white;border:0;font-weight:bold}
+button:active{opacity:.8}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.small{font-size:13px;color:#64748b}
+.item{padding:10px 0;border-bottom:1px solid #e2e8f0;overflow-wrap:anywhere}
+#message{white-space:pre-wrap;font-size:14px}
+@media(max-width:480px){.grid{grid-template-columns:1fr}#map{height:320px}}
+</style>
+</head>
+<body>
+<header>
+<h2>🗺️ Network Fiber Map</h2>
+<div>ফাইবার পয়েন্ট, বক্স ও ক্যাপাসিটি ব্যবস্থাপনা</div>
+</header>
+<main>
+<div class="card">
+<strong>ডেটাবেস সংযোগ</strong>
+<p id="message">সংযোগ পরীক্ষা করা হচ্ছে...</p>
+<button id="reload">তথ্য রিফ্রেশ করুন</button>
+</div>
+
+<div class="card">
+<strong>ম্যাপ</strong>
+<p class="small">ম্যাপে চাপ দিলে অক্ষাংশ ও দ্রাঘিমাংশ ফর্মে বসবে।</p>
+<div id="map"></div>
+</div>
+
+<div class="card">
+<h3>📍 নতুন ফাইবার পয়েন্ট</h3>
+<form id="pointForm">
+<label>পয়েন্টের নাম</label>
+<input id="name" required placeholder="যেমন: Main Box 01">
+<label>পয়েন্টের ধরন</label>
+<select id="type">
+<option>Fiber Point</option>
+<option>Distribution Box</option>
+<option>Splitter Box</option>
+<option>Customer Drop</option>
+<option>POP / OLT</option>
+<option>Other</option>
+</select>
+<label>ফাইবার কোড</label>
+<input id="code" placeholder="যেমন: FB-001">
+<div class="grid">
+<div><label>Latitude</label><input id="lat" type="number" step="any" required placeholder="23.8103"></div>
+<div><label>Longitude</label><input id="lng" type="number" step="any" required placeholder="90.4125"></div>
+<div><label>দূরত্ব (মিটার)</label><input id="distance" type="number" min="0" value="0"></div>
+<div><label>মোট ক্যাপাসিটি</label><input id="total" type="number" min="0" value="0"></div>
+<div><label>ব্যবহৃত ক্যাপাসিটি</label><input id="used" type="number" min="0" value="0"></div>
+<div><label>স্ট্যাটাস</label>
+<select id="status"><option>Active</option><option>Maintenance</option><option>Inactive</option></select></div>
+</div>
+<label>অতিরিক্ত নোট</label>
+<input id="notes" placeholder="এলাকা বা কাজের বিবরণ">
+<button type="submit">পয়েন্ট সংরক্ষণ করুন</button>
+</form>
+<p class="small">এই ফর্ম থেকে সংরক্ষণ করতে Supabase-এ সঠিক অনুমতি ও লগইন প্রয়োজন।</p>
+</div>
+
+<div class="card">
+<h3>📊 পয়েন্টের তালিকা</h3>
+<div id="stats">তথ্য লোড হচ্ছে...</div>
+<div id="points"></div>
+</div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+const SUPABASE_URL = "https://nrqxoeseskdelqzuobnh.supabase.co";
+const SUPABASE_KEY = "PASTE_YOUR_PUBLISHABLE_KEY_HERE";
+
+const message = document.getElementById("message");
+const pointsBox = document.getElementById("points");
+const stats = document.getElementById("stats");
+
+const map = L.map("map").setView([23.8103,90.4125],12);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{
+  attribution:"&copy; OpenStreetMap contributors"
+}).addTo(map);
+
+let markers = [];
+let db = null;
+
+map.on("click",e=>{
+  document.getElementById("lat").value=e.latlng.lat.toFixed(7);
+  document.getElementById("lng").value=e.latlng.lng.toFixed(7);
+});
+
+function showMessage(text){message.textContent=text;}
+
+function escapeHTML(value){
+  return String(value ?? "").replace(/[&<>"']/g,c=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+
+async function loadPoints(){
+  if(!db){showMessage("Supabase Publishable Key বসানো হয়নি।");return;}
+  showMessage("ডেটাবেস থেকে তথ্য আনা হচ্ছে...");
+  const {data,error}=await db.from("network_points").select("*").order("id",{ascending:false});
+  if(error){showMessage("ডেটাবেস Error: "+error.message);return;}
+
+  markers.forEach(m=>map.removeLayer(m));
+  markers=[];
+  pointsBox.innerHTML="";
+  let total=0,used=0;
+
+  if(!data.length) pointsBox.textContent="এখনো কোনো পয়েন্ট সংরক্ষিত নেই।";
+
+  data.forEach(p=>{
+    const lat=Number(p.latitude),lng=Number(p.longitude);
+    if(Number.isFinite(lat)&&Number.isFinite(lng)){
+      const marker=L.marker([lat,lng]).addTo(map);
+      marker.bindPopup("<b>"+escapeHTML(p.name)+"</b><br>"+escapeHTML(p.point_type||"")+"<br>Code: "+escapeHTML(p.code||""));
+      markers.push(marker);
+    }
+    total+=Number(p.total_capacity)||0;
+    used+=Number(p.used_capacity)||0;
+
+    const div=document.createElement("div");
+    div.className="item";
+    div.innerHTML="<b>"+escapeHTML(p.name)+"</b><br>"+
+      "ধরন: "+escapeHTML(p.point_type||"-")+"<br>"+
+      "কোড: "+escapeHTML(p.code||"-")+"<br>"+
+      "দূরত্ব: "+escapeHTML(p.distance_meters??0)+" মিটার<br>"+
+      "ক্যাপাসিটি: "+escapeHTML(p.used_capacity??0)+" / "+escapeHTML(p.total_capacity??0)+"<br>"+
+      "খালি: "+Math.max(0,(Number(p.total_capacity)||0)-(Number(p.used_capacity)||0))+
+      "<br>স্ট্যাটাস: "+escapeHTML(p.status||"-");
+    pointsBox.appendChild(div);
+  });
+
+  stats.textContent="মোট পয়েন্ট: "+data.length+
+    " | মোট ক্যাপাসিটি: "+total+
+    " | ব্যবহৃত: "+used+
+    " | খালি: "+Math.max(0,total-used);
+  showMessage("ডেটাবেস সংযোগ সফল। মোট "+data.length+"টি পয়েন্ট পাওয়া গেছে।");
+}
+
+document.getElementById("pointForm").addEventListener("submit",async e=>{
+  e.preventDefault();
+  if(!db){alert("আগে Supabase Publishable Key বসাতে হবে।");return;}
+
+  const name=document.getElementById("name").value.trim();
+  const latitude=Number(document.getElementById("lat").value);
+  const longitude=Number(document.getElementById("lng").value);
+  const distance=Number(document.getElementById("distance").value||0);
+  const total=Number(document.getElementById("total").value||0);
+  const used=Number(document.getElementById("used").value||0);
+
+  if(!name||!Number.isFinite(latitude)||!Number.isFinite(longitude)||
+     latitude < -90||latitude > 90||longitude < -180||longitude > 180){
+    alert("নাম ও সঠিক Latitude/Longitude দাও।");return;
+  }
+  if([distance,total,used].some(n=>!Number.isFinite(n)||n<0)||used>total){
+    alert("দূরত্ব ও ক্যাপাসিটি যাচাই করো। ব্যবহৃত ক্যাপাসিটি মোট ক্যাপাসিটির বেশি হতে পারবে না।");return;
+  }
+
+  const row={
+    name,
+    point_type:document.getElementById("type").value,
+    code:document.getElementById("code").value.trim(),
+    latitude,longitude,
+    distance_meters:distance,
+    total_capacity:total,
+    used_capacity:used,
+    status:document.getElementById("status").value,
+    notes:document.getElementById("notes").value.trim()
+  };
+
+  const {error}=await db.from("network_points").insert(row);
+  if(error){alert("সংরক্ষণ হয়নি: "+error.message+"\nলগইন বা ডেটাবেস অনুমতি পরীক্ষা করতে হবে।");return;}
+  alert("পয়েন্ট সংরক্ষণ হয়েছে।");
+  e.target.reset();
+  document.getElementById("distance").value=0;
+  document.getElementById("total").value=0;
+  document.getElementById("used").value=0;
+  await loadPoints();
+});
+
+document.getElementById("reload").addEventListener("click",loadPoints);
+
+if(SUPABASE_KEY==="sb_publishable_zYxBXjAlapbMWEZJlnp_6w_VWR5n6if"){
+  showMessage("কোডে Supabase Publishable Key বসাও, তারপর পেজ রিফ্রেশ করো।");
+}else{
+  try{
+    db=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+    loadPoints();
+  }catch(e){showMessage("Supabase চালু হয়নি: "+e.message);}
+}
+</script>
+</body>
+</html>
